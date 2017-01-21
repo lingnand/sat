@@ -1,0 +1,19 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+
+DEV_DIR=$HOME/dev
+REMOTE_DEV_DIR=Developer
+
+# do a translation from local to remote directory path
+
+path="$1"
+
+if ! [[ "$path" =~ "$HOME/dev/projs/"* ]]; then
+    echo "No such path found in remote server..." >&2
+    exit 1
+fi
+
+p_path="${path#$DEV_DIR}"
+remote_path="$REMOTE_DEV_DIR$p_path"
+
+echo "$remote_path"

@@ -1,0 +1,156 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+
+usage="SATellite control
+Usage:
+
+sat pull
+sat push
+sat exec [cmd] ...
+
+pull/push: does an rsync to sync up the content from remote-to-local/local-to-remote
+exec: run the given command in the context of the remote project folder
+"
+
+MASTER=mac
+
+# sync function 
+# $1: src, $2: dest
+sync() {
+    excludes=( '--exclude' '.git' )
+    IFS=$'\n'
+    for f in $(git ls-files --exclude-standard -oi --directory 2>/dev/null || true); do
+        excludes+=( '--exclude' "$f" )
+    done
+    set -x
+    rsync --progress -rlt --omit-dir-times --size-only "${excludes[@]}" "$@"
+    { set +x; } 2>/dev/null
+}
+
+has_git() {
+    [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1
+}
+
+GIT_BRANCH=
+GIT_REMOTE_URL=
+GIT_CURR_REV=
+check_git() {
+    if ! has_git; then
+        echo "Not in a git revisioned directory!" >&2
+        exit 2
+    fi
+    GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+    GIT_REMOTE_URL="$(git config --get remote.$(git remote).url)"
+    GIT_CURR_REV=$(git rev-parse HEAD)
+#     cat << EOD
+# ----------- GIT INFO -----------
+# rev:        $GIT_CURR_REV
+# branch:     $GIT_BRANCH
+# remote-url: $GIT_REMOTE_URL
+# --------------------------------
+# EOD
+}
+
+# make sure satellite and master are on the same page
+git_sync_commit() {
+    check_git
+    script="set -e
+if ! [ -d '$rempath' ]; then
+    read \"?Repo doesn't exist on MASTER. Create in $rempath? [yn] \"
+    [[ \"\$REPLY\" = [yY]* ]] && git clone -b $GIT_BRANCH '$GIT_REMOTE_URL' '$rempath'
+fi
+cd '$rempath'
+curr_rev=\$(git rev-parse HEAD)
+if ! [ \$curr_rev = $GIT_CURR_REV ]; then
+    echo 'Different revisions detected between MASTER and SATELLITE.'
+    # fetch the latest updates, if any
+    set -x
+    git fetch
+    { set +x; } 2>/dev/null
+    # try to sync up
+    if git merge-base --is-ancestor \$curr_rev $GIT_CURR_REV; then
+        read '?MASTER lagging behind SATELLITE; bring forward? [yn] '
+        if [[ \"\$REPLY\" = [yY]* ]]; then
+            set -x
+            if git diff --quiet; then
+                git merge $GIT_CURR_REV --ff-only
+            else
+                git stash save
+                git merge $GIT_CURR_REV --ff-only
+                git stash pop
+            fi
+        else
+            echo 'Autosync interrupted.' >&2
+            exit 2
+        fi
+    elif git merge-base --is-ancestor $GIT_CURR_REV \$curr_rev; then
+        # bring forward the satellite copy
+        exit 66
+    else
+        echo 'MASTER and SATELLITE NOT on linear history! Stopping...' >&2
+        exit 3
+    fi
+fi
+"
+    if ssh -qt $MASTER "$script"; then
+        # success
+        return 0
+    else
+        code=$?
+        if [ $code = 66 ]; then
+            # bring forward the satellite copy
+            read -p 'SATELLITE lagging behind MASTER; bring forward? [yn] ' yn
+            if [[ "$yn" = [yY]* ]]; then
+                forward_to=$(ssh $MASTER "cd $rempath; git rev-parse HEAD")
+                set -x
+                git fetch
+                if git diff --quiet; then
+                    # no diff
+                    git merge $forward_to --ff-only
+                else
+                    git stash save
+                    git merge $forward_to --ff-only
+                    git stash pop
+                fi
+                { set +x; } 2>/dev/null
+            else
+                echo 'Autosync interrupted.' >&2
+                return 2
+            fi
+        else
+            return $code
+        fi
+    fi
+}
+
+path="$PWD"
+rempath="$(remotepath "$path")"
+
+cmd="$1"
+shift || true
+
+case "$cmd" in
+    pull) 
+        git_sync_commit
+        echo "[RSYNC pull] $MASTER:$rempath/ --> $path"
+        sync "$@" "$MASTER:$rempath/" "$path" 
+        ;;
+    push)
+        git_sync_commit
+        echo "[RSYNC push] $path/ --> $MASTER:$rempath"
+        sync "$@" "$path/" "$MASTER:$rempath"
+        ;;
+    exec)
+        # if there is nothing on the command line; do a login shell
+        script="$@"
+        if [ -n "$script" ]; then
+            set -x
+            exec ssh $MASTER "cd $rempath; $script"
+        else
+            exec ssh -t $MASTER "cd '$rempath' || cd '$(dirname $rempath)'; "'$SHELL'
+        fi
+        ;;
+    *)
+        echo "$usage" >&2
+        exit 1
+esac
