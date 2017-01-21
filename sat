@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -e
 
-usage="SATellite control
+USAGE="SATellite control
 Usage:
 
 sat pull
@@ -12,18 +12,33 @@ pull/push: does an rsync to sync up the content from remote-to-local/local-to-re
 exec: run the given command in the context of the remote project folder
 "
 
+# config
 MASTER=mac
 
-# sync function 
-# $1: src, $2: dest
+# GLOBAL VARS
+LOCPATH="$PWD"
+REMPATH="$(remotepath "$LOCPATH")"
+
+GIT_BRANCH=
+GIT_REMOTE_URL=
+GIT_CURR_REV=
+
+# sync function
+# $1: whether git exclusion files should be obtained from master
+# ${@:2}: rsync args
 sync() {
     excludes=( '--exclude' '.git' )
     IFS=$'\n'
-    for f in $(git ls-files --exclude-standard -oi --directory 2>/dev/null || true); do
+    if $1; then
+        exclusion_files=( $(ssh $MASTER "cd $REMPATH; git ls-files --exclude-standard -oi --directory" 2>/dev/null || true) )
+    else
+        exclusion_files=( $(git ls-files --exclude-standard -oi --directory 2>/dev/null || true) )
+    fi
+    for f in "${exclusion_files[@]}"; do
         excludes+=( '--exclude' "$f" )
     done
     set -x
-    rsync --progress -rlt --omit-dir-times --size-only "${excludes[@]}" "$@"
+    rsync --progress -rlt --omit-dir-times --size-only "${excludes[@]}" "${@:2}"
     { set +x; } 2>/dev/null
 }
 
@@ -31,9 +46,6 @@ has_git() {
     [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1
 }
 
-GIT_BRANCH=
-GIT_REMOTE_URL=
-GIT_CURR_REV=
 check_git() {
     if ! has_git; then
         echo "Not in a git revisioned directory!" >&2
@@ -55,11 +67,11 @@ check_git() {
 git_sync_commit() {
     check_git
     script="set -e
-if ! [ -d '$rempath' ]; then
-    read \"?Repo doesn't exist on MASTER. Create in $rempath? [yn] \"
-    [[ \"\$REPLY\" = [yY]* ]] && git clone -b $GIT_BRANCH '$GIT_REMOTE_URL' '$rempath'
+if ! [ -d '$REMPATH' ]; then
+    read \"?Repo doesn't exist on MASTER. Create in $REMPATH? [yn] \"
+    [[ \"\$REPLY\" = [yY]* ]] && git clone -b $GIT_BRANCH '$GIT_REMOTE_URL' '$REMPATH'
 fi
-cd '$rempath'
+cd '$REMPATH'
 curr_rev=\$(git rev-parse HEAD)
 if ! [ \$curr_rev = $GIT_CURR_REV ]; then
     echo 'Different revisions detected between MASTER and SATELLITE.'
@@ -101,7 +113,7 @@ fi
             # bring forward the satellite copy
             read -p 'SATELLITE lagging behind MASTER; bring forward? [yn] ' yn
             if [[ "$yn" = [yY]* ]]; then
-                forward_to=$(ssh $MASTER "cd $rempath; git rev-parse HEAD")
+                forward_to=$(ssh $MASTER "cd $REMPATH; git rev-parse HEAD")
                 set -x
                 git fetch
                 if git diff --quiet; then
@@ -123,34 +135,31 @@ fi
     fi
 }
 
-path="$PWD"
-rempath="$(remotepath "$path")"
-
 cmd="$1"
 shift || true
 
 case "$cmd" in
-    pull) 
+    pull)
         git_sync_commit
-        echo "[RSYNC pull] $MASTER:$rempath/ --> $path"
-        sync "$@" "$MASTER:$rempath/" "$path" 
+        echo "[RSYNC pull] $MASTER:$REMPATH/ --> $LOCPATH"
+        sync true "$@" "$MASTER:$REMPATH/" "$LOCPATH"
         ;;
     push)
         git_sync_commit
-        echo "[RSYNC push] $path/ --> $MASTER:$rempath"
-        sync "$@" "$path/" "$MASTER:$rempath"
+        echo "[RSYNC push] $LOCPATH/ --> $MASTER:$REMPATH"
+        sync false "$@" "$LOCPATH/" "$MASTER:$REMPATH"
         ;;
     exec)
         # if there is nothing on the command line; do a login shell
         script="$@"
         if [ -n "$script" ]; then
             set -x
-            exec ssh $MASTER "cd $rempath; $script"
+            exec ssh $MASTER "cd $REMPATH; $script"
         else
-            exec ssh -t $MASTER "cd '$rempath' || cd '$(dirname $rempath)'; "'$SHELL'
+            exec ssh -t $MASTER "cd '$REMPATH' || cd '$(dirname $REMPATH)'; "'$SHELL'
         fi
         ;;
     *)
-        echo "$usage" >&2
+        echo "$USAGE" >&2
         exit 1
 esac
