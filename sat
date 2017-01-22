@@ -38,7 +38,7 @@ sync() {
         excludes+=( '--exclude' "$f" )
     done
     set -x
-    rsync --progress -rlt --omit-dir-times --size-only "${excludes[@]}" "${@:2}"
+    rsync --progress -rlt --omit-dir-times --size-only -c "${excludes[@]}" "${@:2}"
     { set +x; } 2>/dev/null
 }
 
